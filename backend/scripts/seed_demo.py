@@ -1,4 +1,4 @@
-import json,random
+import json
 from src.config.database import Base,engine,Session
 from src.config.settings import CONFIG
 from src.models.identity import User
@@ -6,12 +6,7 @@ from src.models.source import Source,Policy,Period
 from src.models import run
 from src.utils.security import password_hash
 from src.services.validation import validate_source
-
-def demo_rows():
- rng=random.Random(42);rows=[]
- for i in range(240):
-  total=rng.randint(600,1050);rows.append({'period':'2026-11-'+str(1+i%20).zfill(2),'department':['试制机A','试制机B','试制机C'][i%3],'start':480,'end':1020,'ideal_seconds':25,'total':total,'good':total-rng.randint(10,60),'downtime':[[540,570],[560,590],[950,970]]})
- return rows
+from scripts.demo_data import demo_rows
 
 def seed():
  Base.metadata.create_all(engine)

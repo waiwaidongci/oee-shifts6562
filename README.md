@@ -10,7 +10,18 @@
 ## 算法口径
 停机区间合并裁剪、OEE三因子与按班次透视。重叠区间去重、跨班裁剪手算；性能超1显示警示不静默截断。
 
-停机去重 · 三因子核对 · 逐班回看。输入：业务底稿与口径JSON；输出：summary、透视rows、method、warnings。算法实现在`backend/src/services/calculation.py`，输入校验在`validation.py`。固定seed=42，240条合成数据；未对接真实业务系统。修改源数据和新建因子/口径不会改变已提交报告。
+停机去重 · 三因子核对 · 逐班回看。输入：业务底稿与口径JSON；输出：summary、透视rows、method、warnings。算法实现在`backend/src/services/calculation.py`（逐班公式与排序键），流式分段管线的`backend/src/services/pipeline.py`，输入校验在`validation.py`。固定seed=42，240条合成数据；未对接真实业务系统。修改源数据和新建因子/口径不会改变已提交报告。
+
+## 流式核算（百万班次）
+多月大数据量不再把底稿与逐班结果塞进内存：冻结、核算、导出三阶段各自峰值内存低于128MB，超量分批而非截断。提交时底稿按键集分页流式冻结为规范JSONL分段（`artifacts/runs/{id}/input/`），逐行SHA256入总校验，排队后底稿增改删不影响该次输入；worker逐段核算并写带尾签的临时分段，再k路归并为按设备、日期稳定排序的发布分段（乱序输入输出一致），小计用`math.fsum`汇总，节拍加权规则不变。中断后仅从分段文件恢复续算——尾签校验通过的分段直接跳过、半截分段自动重算，写分段后未记进度也能恢复，重试不重复计入；发布清单逐段校验可读后才清理临时分段，失败不暴露半份结果（行接口与CSV在完成前返回409）。大行数报告页面分页查看（`/runs/{id}/rows`），CSV逐批流式导出；旧版小报告与站内交付保持原格式可读，导出路径自动分流。规模与中断验证：`docker compose exec -T backend python -m scripts.verify_scale`（默认100万班，可用`VERIFY_N`调整）。
+
+## 流式核算（百万班次）
+多月核算不再把全部底稿与逐班结果塞进内存：冻结、核算、导出三阶段均按分段流式处理，单阶段峰值内存低于128MB（`backend/scripts/verify_scale.py`实测）。提交时底稿按键集分页读出，流式冻结为规范JSONL分段（`artifacts/runs/{id}/input/`），SHA256逐行入校验；排队后底稿增改删不影响该次输入。worker逐段核算（段内排序、尾签校验），k路归并发布为按设备、日期稳定排序的逐班分段，乱序输入输出字节级一致；停机去重与节拍加权规则不变。中断后仅从分段文件恢复续算，重试不重复计入；发布清单校验可读后才清理临时分段，失败不暴露半份结果。大行数报告页面分页查看（`/runs/{id}/rows`），CSV逐批流式导出；小报告行为与旧版完全一致，旧报告与站内交付原样可读。
+
+规模与中断验证（默认100万班，含断电续算、半截分段、归并中断、乱序稳定性、旧行为兼容）：
+```sh
+docker compose exec -T backend python -m scripts.verify_scale
+```
 
 ## 一天的验收剧本
 1. 09:00 admin查看240条seed底稿与具名业务期间。
@@ -28,7 +39,7 @@ cp .env.example .env
 docker compose up -d --build
 docker compose exec -T backend python -m scripts.seed_demo
 ```
-前端 http://localhost:18251 ，后端 http://localhost:19251/docs ，数据库宿主端口17751。中文父目录可用。恰好5服务frontend/backend/worker/db/redis；均有真实healthcheck。停止并清空演示数据：`docker compose down -v --remove-orphans`。
+前端 http://localhost:18251 ，后端 http://localhost:19251/docs ，数据库宿主端口17751。中文父目录可用。恰好5服务frontend/backend/worker/db/redis；均有真实healthcheck。停止并清空演示数据：`docker compose down -v --remove-orphans`。规模与中断验证（100万班次、128MB内存上限、断电续算）：`docker compose exec -T backend python -m scripts.verify_scale`。
 
 |角色|邮箱|密码|权限|
 |---|---|---|---|
@@ -37,14 +48,14 @@ docker compose exec -T backend python -m scripts.seed_demo
 |viewer|viewer@demo.local|Demo2026!|只读；仅可下载已复核报告与站内交付|
 
 ## 工程结构与开发
-Python3.11/FastAPI/SQLAlchemy/Redis，MySQL8；前端原生HTML/CSS/JS ES modules，Nginx代理`/api/`剥前缀至后端。`frontend/src`按api/stores/pages/components/hooks/utils/router/constants/types拆分；`backend/src`按models/schemas/services/controllers/routes/middlewares/config/utils/constants拆分；`backend/scripts/seed_demo.py`自然键幂等且不覆盖用户修改。SQLAlchemy启动创建初始结构，迁移说明在backend/migrations。
+Python3.11/FastAPI/SQLAlchemy/Redis，MySQL8；前端原生HTML/CSS/JS ES modules，Nginx代理`/api/`剥前缀至后端。`frontend/src`按api/stores/pages/components/hooks/utils/router/constants/types拆分；`backend/src`按models/schemas/services/controllers/routes/middlewares/config/utils/constants拆分；`backend/scripts/seed_demo.py`自然键幂等且不覆盖用户修改。SQLAlchemy启动创建初始结构，迁移说明在backend/migrations。流式核算：`services/pipeline.py`负责冻结分段、续算、归并发布与流式读取，`services/calculation.py`为逐班公式与口径说明，`scripts/verify_scale.py`验证百万班次规模、128MB内存上限与中断恢复。
 
 后端开发：在backend安装requirements，设置DATABASE_URL/REDIS_URL/JWT_SECRET，`uvicorn src.main:app --reload`；前端可用Nginx或带同等代理的静态开发服务器。前后端全部业务计算在Python。
 
 环境变量：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET（部署替换）、DATABASE_URL、REDIS_URL、SEED_DEMO。`.env`不入Git。数据库/Redis/共享产物为命名卷。共享角色枚举admin/analyst/viewer与状态queued/running/completed/failed分别定义于backend/src/constants/enums.py和frontend/src/constants/enums.js。两个中间件：统一可恢复校验错误、每IP每分钟360请求限流。
 
 ## 已知边界
-定时分发为站内收件箱；一名worker轮询执行，无外部邮件。调度发送已复核固定报告快照，不自动重算新数据。时间显示Asia/Shanghai。报告导出适合小型数据；底稿全量加载240行演示数据。Google Fonts不可用时回退serif。后端API以专属字段对象收发，页面通过业务输入控件编辑，不要求用户写JSON。新增来源期间自动可选；专属字段和算法严格校验。JWT演示有效期2小时。
+定时分发为站内收件箱；一名worker轮询执行，无外部邮件。调度发送已复核固定报告快照，不自动重算新数据。时间显示Asia/Shanghai。冻结/核算/导出各阶段流式分段处理，单阶段内存低于128MB，超量分批而非截断；分段产物写入共享卷report-files（布局与恢复协议见backend/migrations/002_streaming.md）。Google Fonts不可用时回退serif。后端API以专属字段对象收发，页面通过业务输入控件编辑，不要求用户写JSON。新增来源期间自动可选；专属字段和算法严格校验。JWT演示有效期2小时。
 
 MIT License。
 
